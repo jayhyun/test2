@@ -1,0 +1,128 @@
+Opening packages
+```{r packages}
+rm(list=ls())
+setwd('~/Desktop/Projects/Project_MISC37_HIES')
+#library (gplots) #library for graphics
+#library (lattice) #library for multivariate graphics)
+library(RColorBrewer) #Provides colors according to a variable
+library(reshape2) #Implies the functions melt and cast to restructure and aggregate data
+library(ggplot2)
+library(dplyr)
+#library(nortest)
+#library(stats)
+#library(grid)
+```
+<br>
+
+**Load data**
+```{r data}
+table <- read.table('output_count.txt', sep="\t", header=T, stringsAsFactors=F)
+table$taxid <- NULL
+colnames(table) <- gsub('(M\\w\\w\\d\\d\\d\\d).*', '\\1', colnames(table), ignore.case=T)
+
+table <- data.frame(table, stringsAsFactors=F)
+
+metadata <- read.table(file="ns15_summary.txt", sep="\t", header=T, stringsAsFactors=F)
+metadata2 <- metadata[grep("40\\d\\d", metadata$Subject.ID),]
+
+sel_list <- metadata2$Sample
+
+table <- cbind(table$taxa, table[,colnames(table) %in% sel_list])
+colnames(table)[1] <- 'taxa'
+table <- table[-c(grep("Totals|Homo_sapiens", table$taxa)),]
+
+table$taxa <-  gsub("(Bacteria;[^;]*;[^;]*;[^;]*;[^;]*;[^;]*;[^;_]*_[^;_]*).*", "\\1", table$taxa)
+table <- data.frame(table %>% group_by(taxa) %>% summarise_all(funs(sum)))
+rownames(table) <- table$taxa
+table$taxa <- NULL
+
+ratio_table <- function(df){
+  return(data.frame(t(apply(df, 1, function(x){return(unlist(x/colSums(df)))})), stringsAsFactors=F))
+}
+
+table_skin <- ratio_table(table)
+```
+
+**Separate by kingdom**
+```{r}
+#Splitting table
+bacterial <- table_skin[grep("^Bacteria;", rownames(table_skin)),]
+fungal <- table_skin[grep("^Eukaryota;Fungi;", rownames(table_skin)),]
+viral <- table_skin[grep("^Viruses;", rownames(table_skin)),]
+archaea <- table_skin[grep("^Archaea;", rownames(table_skin)),]
+other_eu <- table_skin[grep("^Bacteria;|^Eukaryota;Fungi;|^Viruses;|^Archaea;|^Totals", rownames(table_skin), invert=TRUE),]
+```
+
+**major species**
+```{r}
+major_finder <- function(df, others_name){
+  #major <- df[(apply(df, 1, function(x){sum(as.numeric(x)==0)/length(x)}) <= 0.05), ]
+  if (others_name=="Virus"){
+    major <- df[rowMeans(df) >=0.0005, ]
+  } else {
+    major <- df[rowMeans(df) >=0.01, ]
+  }
+  
+  if (nrow(major)==0){
+    df2 <- data.frame(t(colSums(df)), stringsAsFactors=F)
+    rownames(df2)[1] <- others_name
+    return(df2)
+  } else {
+    df2 <- rbind(major, colSums(df)-colSums(major))
+    rownames(df2)[nrow(df2)] <- paste(others_name, '_others', sep='')
+    rownames(df2) <- gsub('([^;]*);[^;]*;[^;]*;[^;]*;[^;]*;[^;]*;([^;_]*_[^;_]*)', '\\1;\\2', rownames(df2))
+    return(df2)
+  }
+}
+#df <- archaea
+bacterial_skin <- major_finder(bacterial, 'Bacteria')
+fungal_skin <- major_finder(fungal, 'Fungi')
+viral_skin <- major_finder(viral, 'Virus')
+archaea_skin <- major_finder(archaea, 'Archaea')
+other_eu_skin <- major_finder(other_eu, 'Eukaryote')
+```
+
+**Kingdom level analysis**
+```{r}
+#Merge all by kingdom
+kingdom_df <- data.frame(rbind(bacterial_skin, viral_skin, fungal_skin,
+                              archaea_skin, other_eu_skin), stringsAsFactors=F)
+kingdom_df.2 <- cbind(rownames(kingdom_df), rownames(kingdom_df), kingdom_df)
+colnames(kingdom_df.2)[1:2] <- c("Classification", "Tax_order")
+
+kingdom_df.2$Tax_order <- factor(kingdom_df.2$Tax_order, levels=c(as.character(kingdom_df.2$Classification)))
+kingdom_df.2 <- arrange(kingdom_df.2, desc(Tax_order))
+
+melted_kingdom <- melt(kingdom_df.2, id=c("Classification", "Tax_order"))
+
+metadata_finder <- function(df, metadata){
+  Subject <- NULL
+  Site <- NULL
+  for (i in as.character(df$variable)){
+    Subject <- append(Subject, gsub("(\\d\\d\\d\\d)\\.([^\\.]*)\\..*", "\\1", metadata$Subject.ID[grep(i, metadata$Sample)]))
+    Site <- append(Site, gsub("(\\d\\d\\d\\d)\\.([^\\.]*)\\..*", "\\2", metadata$Subject.ID[grep(i, metadata$Sample)]))
+  }
+  df$Subject <- Subject
+  df$Site <- Site
+  return(df)
+}
+
+melted_kingdom2 <- metadata_finder(melted_kingdom, metadata)
+melted_kingdom2$Site2 <- gsub("(\\w*)R([AU])Sw", "\\1", melted_kingdom2$Site)
+melted_kingdom2$Site2 <- gsub("CtrlUSw", "Ctrl", melted_kingdom2$Site2)
+melted_kingdom2$AU <- gsub("(\\w*)R([AU])Sw", "\\2", melted_kingdom2$Site)
+melted_kingdom2$AU <- gsub("CtrlUSw", "U", melted_kingdom2$AU)
+
+color_pall <- c(brewer.pal(5, 'Greens'), brewer.pal(3, 'Blues'), brewer.pal(4, 'Reds'), "black",
+                brewer.pal(3, 'Purples')[c(2,3)], brewer.pal(3, 'Oranges'), 'violetred3',
+                brewer.pal(3, 'Greys'), brewer.pal(5, 'Set2')[c(3,4)])
+
+
+pdf(file="species_level_abundance_not_normalized.pdf", height=10, width=21)
+ggplot(melted_kingdom2) + 
+  geom_bar(aes(x=factor(Subject), y=value, fill=Tax_order),stat="identity", position="fill", alpha=0.8) + theme_bw() + 
+  geom_point(aes(x=factor(Subject), y=1, shape=AU, color=AU))+
+  scale_fill_manual(values=color_pall) +
+  facet_wrap(~Site2)
+dev.off(); # close the PDF writer
+```
